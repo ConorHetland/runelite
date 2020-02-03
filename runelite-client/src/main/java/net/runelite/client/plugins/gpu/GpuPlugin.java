@@ -144,6 +144,10 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 	private int glUnorderedComputeProgram;
 	private int glUnorderedComputeShader;
 
+	private int glPostprocessProgram;
+	private int glPostprocessVertexShader;
+	private int glPostprocessFragmentShader;
+
 	private int vaoHandle;
 
 	private int interfaceTexture;
@@ -156,8 +160,13 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 	private int vboUiHandle;
 
 	private int fboSceneHandle;
-	private int texSceneHandle;
 	private int rboSceneHandle;
+	private int texSceneHandle;
+
+	private int fboPostprocessHandle;
+	private int rboPostprocessHandle;
+	private int texPostprocessHandle;
+
 
 	// scene vertex buffer id
 	private int bufferId;
@@ -237,6 +246,7 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 	private int uniBlockLarge;
 	private int uniBlockMain;
 	private int uniSmoothBanding;
+	private int uniViewportResolution;
 
 	private int drawDistance;
 	private boolean smoothBanding;
@@ -534,6 +544,20 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 			null,
 			fragSource);
 
+		glPostprocessProgram = gl.glCreateProgram();
+		glPostprocessVertexShader = gl.glCreateShader(gl.GL_VERTEX_SHADER);
+		glPostprocessFragmentShader = gl.glCreateShader(gl.GL_FRAGMENT_SHADER);
+		template = new Template(resourceLoader);
+		vertSource = template.process(resourceLoader.apply("vertpostprocess.glsl"));
+		template = new Template(resourceLoader);
+		fragSource = template.process(resourceLoader.apply("fragpostprocess.glsl"));
+		GLUtil.loadShaders(gl, glPostprocessProgram, glPostprocessVertexShader, -1, glPostprocessFragmentShader,
+				vertSource,
+				null,
+				fragSource);
+
+
+
 		initUniforms();
 	}
 
@@ -559,6 +583,8 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 		uniBlockSmall = gl.glGetUniformBlockIndex(glSmallComputeProgram, "uniforms");
 		uniBlockLarge = gl.glGetUniformBlockIndex(glComputeProgram, "uniforms");
 		uniBlockMain = gl.glGetUniformBlockIndex(glProgram, "uniforms");
+
+		uniViewportResolution = gl.glGetUniformLocation(glPostprocessProgram, "viewportResolution");
 	}
 
 	private void shutdownProgram()
@@ -601,6 +627,12 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 
 		gl.glDeleteProgram(glUiProgram);
 		glUiProgram = -1;
+
+		gl.glDeleteShader(glPostprocessVertexShader);
+		glPostprocessVertexShader = -1;
+
+		gl.glDeleteShader(glPostprocessFragmentShader);
+		glPostprocessFragmentShader = -1;
 	}
 
 	private void initVao()
@@ -720,16 +752,37 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 			texSceneHandle = -1;
 		}
 
+		if (rboSceneHandle != -1)
+		{
+			glDeleteRenderbuffers(gl, rboSceneHandle);
+			rboSceneHandle = -1;
+		}
+
 		if (fboSceneHandle != -1)
 		{
 			glDeleteFrameBuffer(gl, fboSceneHandle);
 			fboSceneHandle = -1;
 		}
+	}
 
-		if (rboSceneHandle != -1)
+	private void shutdownPostprocessFbo()
+	{
+		if (texPostprocessHandle != -1)
 		{
-			glDeleteRenderbuffers(gl, rboSceneHandle);
-			rboSceneHandle = -1;
+			glDeleteTexture(gl, texPostprocessHandle);
+			texPostprocessHandle = -1;
+		}
+
+		if (rboPostprocessHandle != -1)
+		{
+			glDeleteRenderbuffers(gl, rboPostprocessHandle);
+			rboPostprocessHandle = -1;
+		}
+
+		if (fboPostprocessHandle != -1)
+		{
+			glDeleteFrameBuffer(gl, fboPostprocessHandle);
+			fboPostprocessHandle = -1;
 		}
 	}
 
@@ -1113,6 +1166,7 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 			gl.glUniform1f(uniBrightness, (float) textureProvider.getBrightness());
 			gl.glUniform1f(uniSmoothBanding, this.smoothBanding ? 0f : 1f);
 
+
 			for (int id = 0; id < textures.length; ++id)
 			{
 				Texture texture = textures[id];
@@ -1171,6 +1225,7 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 			gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, 0);
 		}
 
+
 		vertexBuffer.clear();
 		uvBuffer.clear();
 		modelBuffer.clear();
@@ -1191,7 +1246,56 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 		glDeleteBuffer(gl, outUvBufferId);
 
 		// Texture on UI
-		drawUi(canvasHeight, canvasWidth);
+		drawUi(canvasWidth, canvasHeight);
+
+		
+		// somewhat hacky postprocess
+		// Create and bind the FBO
+
+		fboPostprocessHandle = glGenFrameBuffer(gl);
+		gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, fboPostprocessHandle);
+
+		// Create color render buffer
+		rboPostprocessHandle = glGenRenderbuffer(gl);
+		gl.glBindRenderbuffer(gl.GL_RENDERBUFFER, rboPostprocessHandle);
+		gl.glRenderbufferStorage(gl.GL_RENDERBUFFER, gl.GL_RGBA, lastStretchedCanvasWidth, lastStretchedCanvasHeight);
+		gl.glBindRenderbuffer(gl.GL_RENDERBUFFER, 0);
+
+		// attach renderbuffer to currently bound framebuffer object
+		gl.glFramebufferRenderbuffer(gl.GL_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT0, gl.GL_RENDERBUFFER, rboPostprocessHandle);
+
+		// Create texture
+		texPostprocessHandle = glGenTexture(gl);
+		gl.glBindTexture(gl.GL_TEXTURE_2D, texPostprocessHandle);
+		gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA, lastStretchedCanvasWidth, lastStretchedCanvasHeight, 0,  gl.GL_BGRA, gl.GL_UNSIGNED_INT_8_8_8_8_REV, null);
+		gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR);
+		gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR);
+		gl.glBindTexture(gl.GL_TEXTURE_2D, 0);
+
+		// attach texture to currently bound framebuffer object
+		gl.glFramebufferTexture2D(gl.GL_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT0, gl.GL_TEXTURE_2D, texPostprocessHandle, 0);
+		// Blit existing framebuffer to postprocessing framebuffer
+		gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, 0);
+		gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, fboPostprocessHandle);
+		gl.glBlitFramebuffer(0, 0, lastStretchedCanvasWidth, lastStretchedCanvasHeight,
+				0, 0, lastStretchedCanvasWidth, lastStretchedCanvasHeight,
+				gl.GL_COLOR_BUFFER_BIT, gl.GL_NEAREST);
+
+		gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, 0);
+
+		gl.glUseProgram(glPostprocessProgram);
+
+		gl.glUniform2f(uniViewportResolution, lastStretchedCanvasWidth, lastStretchedCanvasHeight);
+
+		gl.glBindVertexArray(vaoUiHandle);
+		gl.glDisable(gl.GL_DEPTH_TEST);
+		gl.glEnableVertexAttribArray(0);
+		gl.glEnableVertexAttribArray(1);
+		gl.glBindTexture(gl.GL_TEXTURE_2D, texPostprocessHandle);
+		//gl.glBindTexture(gl.GL_TEXTURE_2D, interfaceTexture);
+		gl.glDrawArrays(gl.GL_TRIANGLE_FAN, 0, 4);
+		gl.glEnable(gl.GL_DEPTH_TEST);
+		gl.glBindTexture(gl.GL_TEXTURE_2D, 0);
 
 		try
 		{
@@ -1203,9 +1307,11 @@ public class GpuPlugin extends Plugin implements DrawCallbacks
 		}
 
 		drawManager.processDrawComplete(this::screenshot);
+
+		shutdownPostprocessFbo();
 	}
 
-	private void drawUi(final int canvasHeight, final int canvasWidth)
+	private void drawUi(final int canvasWidth, final int canvasHeight)
 	{
 		final BufferProvider bufferProvider = client.getBufferProvider();
 		final int[] pixels = bufferProvider.getPixels();
